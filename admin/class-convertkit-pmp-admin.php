@@ -117,7 +117,8 @@ class ConvertKit_PMP_Admin {
 			apply_filters( $this->plugin_name . '-require-opt-in', __( 'Require Opt-In', 'convertkit-pmp' ) ),
 			array( $this, 'display_options_require_opt_in' ),
 			$this->plugin_name,
-			$this->plugin_name . '-display-options'
+			$this->plugin_name . '-display-options',
+			array( 'class' => 'convertkit_pmp_require_opt_in' )
 		);
 
 		// add_settings_field( $id, $title, $callback, $menu_slug, $section, $args );
@@ -126,7 +127,8 @@ class ConvertKit_PMP_Admin {
 			apply_filters( $this->plugin_name . '-require-opt-in-label', __( 'Require Opt-In Label', 'convertkit-pmp' ) ),
 			array( $this, 'display_options_require_opt_in_label' ),
 			$this->plugin_name,
-			$this->plugin_name . '-display-options'
+			$this->plugin_name . '-display-options',
+			array( 'class' => 'convertkit_hide' )
 		);
 
 		// add_settings_section( $id, $title, $callback, $menu_slug );
@@ -141,7 +143,20 @@ class ConvertKit_PMP_Admin {
 		$levels = $this->get_pmp_membership_levels();
 
 		// Get all tags from ConvertKit
-		$tags = $this->api->get_tags();
+		$tags = $this->api->get_tags();		
+
+		//Choose which tag should be used for non-members
+		add_settings_field(
+			'convertkit-mapping-0',
+			apply_filters( $this->plugin_name . '-display-convertkit-mapping-0' , __('Non-members', 'convertkit-pmp' ) ),
+			array( $this, 'display_options_convertkit_mapping' ),
+			$this->plugin_name,
+			$this->plugin_name . '-ck-mapping',
+			array( 'key' => 0,
+			       'name' => __('Non-members','convertkit-pmp'),
+			       'tags' => $tags,
+			)
+		);
 
 		// No PMP mappings created yet
 		if ( empty ( $levels ) ){
@@ -177,7 +192,7 @@ class ConvertKit_PMP_Admin {
 	/**
 	 * Detect if the API key has changed and clear transient data if needed
 	 *
-	 * @since       TBD
+	 * @since       1.2.0
 	 * @return      void
 	 */
 	public function updated_options( $option, $old_value, $new_value ) {
@@ -315,7 +330,25 @@ class ConvertKit_PMP_Admin {
 
 		?><input type="checkbox" id="<?php echo $this->plugin_name; ?>-options[require-opt-in]" name="<?php echo $this->plugin_name; ?>-options[require-opt-in]" <?php checked( $require_opt_in, 'yes' ); ?> value="yes" />
 		<label for="<?php echo $this->plugin_name; ?>-options[require-opt-in]"><?php esc_html_e( 'Display an opt-in checkbox on Membership Checkout' ); ?></label>
-		<p class="description"><?php esc_html_e( 'If enabled, members will only be subscribed and tagged in ConvertKit if the "opt-in" checkbox presented on checkout is checked.', 'convertkit-pmp' ); ?></p><?php
+		<p class="description"><?php esc_html_e( 'If enabled, members will only be subscribed and tagged in ConvertKit if the "opt-in" checkbox presented on checkout is checked.', 'convertkit-pmp' ); ?></p>
+		<script type='text/javascript'>
+		jQuery(document).ready(function(){
+			if( jQuery( '.convertkit_pmp_require_opt_in input' ).is( ':checked' ) ) {
+				jQuery( '.convertkit_hide' ).show();
+			} else {
+				jQuery( '.convertkit_hide' ).hide();
+			}
+			jQuery('body').on('click', '.convertkit_pmp_require_opt_in input', function(){
+				if( jQuery(this).is(':checked' ) ) {
+					jQuery( '.convertkit_hide' ).show();
+				} else {
+					jQuery( '.convertkit_hide' ).hide();
+				}
+				
+		    });
+		});
+		</script>
+		<?php
 	}
 
 
@@ -336,7 +369,6 @@ class ConvertKit_PMP_Admin {
 		?><input type="text" id="<?php echo $this->plugin_name; ?>-options[require-opt-in-label]" name="<?php echo $this->plugin_name; ?>-options[require-opt-in-label]" value="<?php echo esc_attr( $require_opt_in_label ); ?>" size="60" />
 		<p class="description"><?php echo __( 'Optional (only used if the above field is checked). Customize the required opt-in label shown on Membership Checkout.', 'convertkit-pmp' ); ?></p><?php
 	}
-
 
 	/**
 	 * Empty mapping callback
@@ -388,7 +420,10 @@ class ConvertKit_PMP_Admin {
 				?>
 				<option value="<?php echo $value; ?>" <?php selected( $tag, $value ); ?>><?php echo $text; ?></option><?php
 			}
-			?></select><?php
+			?></select><?php			
+			if ( $args['key'] === 0 ) {
+				printf( "<p class='description'><small>%s</small></p>", esc_html( "This tag will be assigned when a member's level is removed.", "convertkit-pmp" ) );
+			}
 		}
 
 	}
@@ -471,7 +506,7 @@ class ConvertKit_PMP_Admin {
 				if ( ! empty( $tag_id_to_add ) ) {
 					$new_tags[] = $tag_id_to_add;
 				}
-			}
+			}			
 
 			// Remove duplicates in the array of new and old tags.
 			$new_tags = array_unique( $new_tags );		
@@ -487,9 +522,33 @@ class ConvertKit_PMP_Admin {
 			$user_name = $user->first_name . ' ' . $user->last_name;
 
 			/**
+			 * No new levels so we're assuming they're cancelling. 
+			 * We'll add a 'Non-member' tag to the subscriber and remove it if they become a member again
+			 */
+
+			if( empty( $new_tags ) ) {
+
+				$non_members_tag = $this->get_option( 'convertkit-mapping-0' );
+
+				if( !empty( $non_members_tag ) ) {
+					$subscribe_tags[] = $non_members_tag;
+				}
+
+			} else {
+
+				//We're signing up for a new level, make sure the non-member tag is removed
+				$non_members_tag = $this->get_option( 'convertkit-mapping-0' );
+				if( !empty( $non_members_tag ) ) {
+					$api_secret_key = $this->get_option( 'api-secret-key' );
+					$this->api->remove_tag_from_user( $user_email, $api_secret_key, $non_members_tag );
+				}
+				
+			}
+
+			/**
 			 * Allow custom code to filter the subscribe tags for the user by email.
 			 *
-			 * @since TBD
+			 * @since 1.2.0
 			 *
 			 * @param array $subscribe_tags The array of tag IDs to subscribe this email address to.
 			 * @param string $user_email The user's email address to subscribe tags for.
@@ -501,7 +560,7 @@ class ConvertKit_PMP_Admin {
 			/**
 			 * Allow custom code to add additional fields for the subscriber.
 			 *
-			 * @since TBD
+			 * @since 1.2.0
 			 *
 			 * @param array $subscribe_fields The array of fields to add for the subscriber.
 			 * @param string $user_email The user's email address to subscribe tags for.
@@ -525,7 +584,7 @@ class ConvertKit_PMP_Admin {
 				/**
 				 * Allow custom code to filter the unsubscribe tags for the user by email.
 				 *
-				 * @since TBD
+				 * @since 1.2.0
 				 *
 				 * @param array $unsubscribe_tags The array of tag IDs to unubscribe this email address from.
 				 * @param string $user_email The user's email address to unsubscribe tags for.
@@ -653,7 +712,7 @@ class ConvertKit_PMP_Admin {
  	 * Updates a subscriber's details upon updating a user profile in wp-admin		
  	 *		
  	 * @access public		
- 	 * @since TBD		
+ 	 * @since 1.2.0		
  	 * @return void		
  	 */		
  	public function update_profile( $user_id ) {	
@@ -730,4 +789,5 @@ class ConvertKit_PMP_Admin {
 		}
 		return $links;
 	}
+
 }
